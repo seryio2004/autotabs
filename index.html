@@ -2,10 +2,17 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>PDF + MP3 sincronizados (doble página, auto/manual)</title>
+  <title>PDF + MP3 sincronizados (saltos simples)</title>
+
+  <!-- Favicon vacío para evitar 404 -->
+  <link rel="icon" href="data:,">
 
   <!-- PDF.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+  </script>
 
   <style>
     body {
@@ -52,44 +59,46 @@
       margin-bottom: 0.25rem;
       color: #666;
     }
-    .mode-options {
-      margin-top: 0.75rem;
-      font-size: 0.9rem;
-    }
-    .mode-options label {
-      font-weight: 400;
-      display: inline-block;
-      margin-right: 1rem;
-    }
     #manual-panel {
       margin-top: 0.75rem;
       padding: 0.5rem;
       border-radius: 6px;
       background: #fafafa;
       border: 1px solid #e0e0e0;
+      font-size: 0.85rem;
     }
-    .manual-row {
+    #manual-controls .row {
       display: flex;
       align-items: center;
       gap: 0.5rem;
       margin-bottom: 0.35rem;
+    }
+    #manual-controls label {
+      margin: 0;
+      font-weight: 500;
+      min-width: 150px;
+    }
+    #manual-controls input[type="number"] {
+      width: 90px;
+      padding: 0.2rem 0.3rem;
       font-size: 0.85rem;
     }
-    .manual-row input[type="number"] {
-      width: 80px;
-      padding: 0.15rem 0.3rem;
+    #apply-btn {
+      margin-top: 0.5rem;
+      padding: 0.3rem 0.8rem;
       font-size: 0.85rem;
-    }
-    .manual-row button {
-      font-size: 0.8rem;
-      padding: 0.15rem 0.4rem;
       cursor: pointer;
+    }
+    #hint {
+      font-size: 0.8rem;
+      color: #666;
+      margin-top: 0.25rem;
     }
   </style>
 </head>
 <body>
 
-  <h1>PDF + MP3 sincronizados (doble página, auto/manual)</h1>
+  <h1>PDF + MP3 sincronizados (saltos de página)</h1>
 
   <div class="panel">
     <label>Subir PDF de la tablatura / partitura:</label>
@@ -100,18 +109,20 @@
 
     <button id="load-btn">Cargar PDF y MP3</button>
 
-    <div class="mode-options">
-      <span>Modo de cambios:</span>
-      <label><input type="radio" name="mode" id="mode-auto" checked> Automático (BPM/compases)</label>
-      <label><input type="radio" name="mode" id="mode-manual"> Manual (ajustar segundos)</label>
-    </div>
-
-    <div id="manual-panel" style="display:none;">
-      <p style="font-size:0.85rem;color:#555;margin-top:0;">
-        Basado en el cálculo automático. Ajusta los segundos de cambio, o pulsa
-        <b>“Usar tiempo actual”</b> mientras suena el audio para afinar a oído.
+    <div id="manual-panel">
+      <p style="margin:0 0 0.5rem;">
+        Se crean automáticamente unos <b>saltos de página aproximados</b> a partir de la duración
+        real del MP3. Cada salto mueve la página derecha a la izquierda y carga la siguiente.
+        Puedes ajustar cada tiempo (en segundos) y pulsar <b>“Aplicar cambios”</b>.
       </p>
-      <div id="manual-controls"></div>
+      <div id="manual-controls">
+        <!-- Aquí aparecerán los saltos: Salto 1, Salto 2, ... -->
+      </div>
+      <button id="apply-btn">Aplicar cambios</button>
+      <div id="hint">
+        Truco: reproduce la canción, mira en qué segundo debería cambiar de páginas (por ejemplo,
+        pasar de 1–2 a 2–3) y ajusta el valor del salto correspondiente para que coincida.
+      </div>
     </div>
 
     <div id="status">Esperando archivos…</div>
@@ -133,37 +144,25 @@
   </div>
 
 <script>
-  // ========= CONFIGURACIÓN MUSICAL (base automática) =========
-  const songStructure = {
-    bpm: 120,             // Ajusta al BPM real de la canción
-    beatsPerBar: 4,       // 4/4 normalmente
-    offsetSeconds: 0,     // Si la tab empieza más tarde que el audio, pon el retraso aquí
-    extraLateDelaySeconds: 2.0, // Retraso global: cambia SIEMPRE tarde
-
-    // Para cada página: compases que abarca
-    pageByBars: [
-      { fromBar: 1,  toBar: 8,  page: 1 },
-      { fromBar: 9,  toBar: 16, page: 2 },
-      { fromBar: 17, toBar: 24, page: 3 },
-      { fromBar: 25, toBar: 32, page: 4 }
-      // Añade más si tu PDF tiene más páginas
-    ]
-  };
-
   // ========= VARIABLES GLOBALES =========
   let pdfDoc = null;
   let pdfLoaded = false;
+  let audioMetaLoaded = false;
+  let audioDuration = 0;
 
+  // Páginas visibles
   let leftPage = 1;
   let rightPage = 2;
-  let logicalPage = 1;       // página "activa" según el tiempo
 
-  let pageSegments = [];     // datos automáticos por página (start/end/change)
-  let autoChangePoints = []; // {page, changeTime} calculado automáticamente
-  let manualChangePoints = []; // copia editable para modo manual
+  // Tiempos de SALTO de página (en segundos).
+  // pageTurnTimes[i] = segundo del MP3 en el que se produce el salto i+1:
+  //   - Antes de salto 1 -> se ve (1,2)
+  //   - Entre salto 1 y salto 2 -> se ve (2,3)
+  //   - Entre salto 2 y salto 3 -> se ve (3,4)
+  //   - etc.
+  let pageTurnTimes = [];
 
-  let mode = 'auto';
-
+  // Referencias al DOM
   const leftCanvas = document.getElementById('pdf-left');
   const rightCanvas = document.getElementById('pdf-right');
   const leftCtx = leftCanvas.getContext('2d');
@@ -174,107 +173,107 @@
 
   const statusEl = document.getElementById('status');
   const audio = document.getElementById('player');
-  const manualPanel = document.getElementById('manual-panel');
+
   const manualControls = document.getElementById('manual-controls');
+  const applyBtn = document.getElementById('apply-btn');
 
-  const modeAutoRadio = document.getElementById('mode-auto');
-  const modeManualRadio = document.getElementById('mode-manual');
-
-  // ========= PRE-CÁLCULOS AUTOMÁTICOS =========
-  function buildPageSegments() {
-    const {
-      bpm,
-      beatsPerBar,
-      offsetSeconds,
-      extraLateDelaySeconds,
-      pageByBars
-    } = songStructure;
-
-    pageSegments = pageByBars.map(seg => {
-      const startBeats = (seg.fromBar - 1) * beatsPerBar;
-      const endBeats   = seg.toBar * beatsPerBar;
-
-      const startTime = offsetSeconds + (startBeats / bpm) * 60;
-      const endTime   = offsetSeconds + (endBeats   / bpm) * 60;
-
-      const changeTime = endTime + extraLateDelaySeconds;
-
-      return {
-        page: seg.page,
-        startTime,
-        endTime,
-        changeTime
-      };
-    });
-
-    // A partir de los segmentos, generamos puntos de cambio:
-    // "en el segundo X, cambiamos a la página Y".
-    autoChangePoints = [];
-    for (let i = 1; i < pageSegments.length; i++) {
-      autoChangePoints.push({
-        page: pageSegments[i].page,
-        changeTime: pageSegments[i].changeTime
-      });
-    }
-  }
-
-  function initManualFromAuto() {
-    // Partimos de la base automática
-    manualChangePoints = autoChangePoints.map(cp => ({
-      page: cp.page,
-      changeTime: cp.changeTime
-    }));
-    renderManualControls();
-  }
-
-  function renderManualControls() {
-    manualControls.innerHTML = '';
-    if (!manualChangePoints.length) {
-      manualControls.textContent = 'No hay cambios de página definidos.';
+  // ========= CÁLCULO AUTOMÁTICO INICIAL DE pageTurnTimes =========
+  function initPageTurnTimes() {
+    if (!pdfDoc || !audioMetaLoaded) {
+      renderManualControls();
       return;
     }
 
-    manualChangePoints.forEach((cp, idx) => {
-      const row = document.createElement('div');
-      row.className = 'manual-row';
+    const totalPages = pdfDoc.numPages;
 
-      const label = document.createElement('span');
-      label.textContent = `Cambio a página ${cp.page} en`;
+    // Con 1 o 2 páginas no tiene sentido hacer saltos:
+    //   - 1 página: siempre la misma.
+    //   - 2 páginas: siempre (1,2).
+    if (totalPages <= 2 || audioDuration <= 0) {
+      pageTurnTimes = [];
+      renderManualControls();
+      return;
+    }
+
+    // Número de saltos posibles:
+    //   Páginas: 1,2,3,4,...,N
+    //   Vistas: (1,2) -> (2,3) -> ... -> (N-1, N)
+    //   Número de vistas = N-1  => número de saltos = (N-1) - 1 = N-2
+    const numTurns = totalPages - 2;
+
+    pageTurnTimes = new Array(numTurns);
+
+    // Repartimos la duración en (numTurns + 1) tramos y usamos los puntos intermedios
+    const step = audioDuration / (numTurns + 1);
+    for (let i = 0; i < numTurns; i++) {
+      pageTurnTimes[i] = step * (i + 1);
+    }
+
+    renderManualControls();
+  }
+
+  // ========= UI PARA EDITAR pageTurnTimes =========
+  function renderManualControls() {
+    manualControls.innerHTML = '';
+
+    if (!pdfDoc) {
+      const note = document.createElement('div');
+      note.textContent = 'Carga un PDF y un MP3 para ver y editar los saltos de página.';
+      manualControls.appendChild(note);
+      return;
+    }
+
+    const totalPages = pdfDoc.numPages;
+
+    if (totalPages <= 2) {
+      const note = document.createElement('div');
+      note.textContent = 'El PDF tiene solo 1 o 2 páginas; no hay saltos de página automáticos.';
+      manualControls.appendChild(note);
+      return;
+    }
+
+    if (!audioMetaLoaded || audioDuration <= 0) {
+      const note = document.createElement('div');
+      note.textContent = 'Esperando a que se cargue el MP3 para calcular saltos aproximados.';
+      manualControls.appendChild(note);
+      return;
+    }
+
+    if (!pageTurnTimes || pageTurnTimes.length === 0) {
+      const note = document.createElement('div');
+      note.textContent = 'No hay saltos definidos. Revisa que el MP3 tenga duración válida.';
+      manualControls.appendChild(note);
+      return;
+    }
+
+    const numTurns = pageTurnTimes.length;
+
+    for (let i = 0; i < numTurns; i++) {
+      const saltoIndex = i + 1;
+      const leftAfter = 1 + saltoIndex;          // página izquierda después de ese salto
+      const rightAfter = Math.min(totalPages, leftAfter + 1);
+
+      const row = document.createElement('div');
+      row.className = 'row';
+
+      const label = document.createElement('label');
+      label.textContent = `Salto ${saltoIndex} (ver páginas ${leftAfter}–${rightAfter}):`;
 
       const input = document.createElement('input');
       input.type = 'number';
       input.step = '0.1';
-      input.value = cp.changeTime.toFixed(2);
-      input.addEventListener('change', () => {
-        const val = parseFloat(input.value.replace(',', '.'));
-        cp.changeTime = isNaN(val) ? cp.changeTime : Math.max(0, val);
-      });
+      input.dataset.index = String(i);
+      input.value = pageTurnTimes[i].toFixed(2);
 
-      const spanSeg = document.createElement('span');
-      spanSeg.textContent = 'seg';
-
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = 'Usar tiempo actual';
-      btn.addEventListener('click', () => {
-        if (!audio.duration || isNaN(audio.currentTime)) {
-          alert('Reproduce el audio para poder fijar el tiempo actual.');
-          return;
-        }
-        cp.changeTime = audio.currentTime;
-        input.value = cp.changeTime.toFixed(2);
-      });
+      const span = document.createElement('span');
+      span.textContent = 'seg';
 
       row.appendChild(label);
       row.appendChild(input);
-      row.appendChild(spanSeg);
-      row.appendChild(btn);
+      row.appendChild(span);
       manualControls.appendChild(row);
-    });
+    }
   }
-
-  buildPageSegments();
-  initManualFromAuto();
 
   // ========= CARGA DE PDF =========
   function loadPDF(file) {
@@ -285,13 +284,17 @@
         pdfDoc = doc;
         pdfLoaded = true;
 
-        const firstPage = songStructure.pageByBars[0]?.page || 1;
-        logicalPage = firstPage;
-        leftPage = logicalPage;
-        rightPage = Math.min(logicalPage + 1, pdfDoc.numPages);
+        const totalPages = pdfDoc.numPages;
+
+        leftPage = 1;
+        rightPage = Math.min(2, totalPages);
 
         renderDoublePage();
-        statusEl.textContent = `PDF cargado: ${pdfDoc.numPages} páginas.`;
+
+        // En cuanto tengamos duración del audio, se calculan los saltos
+        initPageTurnTimes();
+
+        statusEl.textContent = `PDF cargado: ${totalPages} páginas. Ajusta los saltos si quieres y pulsa "Aplicar cambios".`;
       }).catch(err => {
         console.error(err);
         statusEl.textContent = 'Error al cargar el PDF.';
@@ -303,6 +306,8 @@
   function renderPage(pageNumber, canvas, ctx) {
     if (!pdfDoc || pageNumber < 1 || pageNumber > pdfDoc.numPages) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      canvas.width = 0;
+      canvas.height = 0;
       return;
     }
 
@@ -323,88 +328,108 @@
     renderPage(leftPage, leftCanvas, leftCtx);
     renderPage(rightPage, rightCanvas, rightCtx);
 
-    leftLabel.textContent = pdfDoc ? `Página ${leftPage}` : '';
-    rightLabel.textContent = (pdfDoc && rightPage <= pdfDoc.numPages)
-      ? `Página ${rightPage}`
-      : '';
-  }
-
-  // ========= LÓGICA DE PÁGINA SEGÚN TIEMPO =========
-  function getLogicalPageForTime(time) {
-    const firstPage = songStructure.pageByBars[0]?.page || 1;
-    const points = (mode === 'manual') ? manualChangePoints : autoChangePoints;
-
-    let page = firstPage;
-
-    // Nunca cambia antes: sólo cuando el tiempo supera el changeTime
-    for (const cp of points) {
-      if (time >= cp.changeTime) {
-        page = cp.page;
-      } else {
-        break;
-      }
+    if (pdfDoc) {
+      leftLabel.textContent = `Página ${leftPage}`;
+      rightLabel.textContent = (rightPage <= pdfDoc.numPages) ? `Página ${rightPage}` : '';
+    } else {
+      leftLabel.textContent = '';
+      rightLabel.textContent = '';
     }
-
-    return page;
   }
 
-  function updateViewerToLogicalPage() {
-    if (!pdfDoc) return;
-
-    // Si ya se ve en la izquierda o la derecha, no movemos nada
-    if (logicalPage === leftPage || logicalPage === rightPage) {
+  // ========= ACTUALIZAR PÁGINAS SEGÚN TIEMPO DEL AUDIO =========
+  function updatePagesForCurrentTime() {
+    if (!pdfDoc || !pdfLoaded || !pageTurnTimes || pageTurnTimes.length === 0) {
       return;
     }
 
-    // Queremos que la "ventana" de 2 páginas vaya avanzando
-    // de forma contigua: (1-2), luego (2-3), luego (3-4)...
-    while (logicalPage > rightPage && rightPage < pdfDoc.numPages) {
-      leftPage = rightPage;
-      rightPage = Math.min(pdfDoc.numPages, rightPage + 1);
+    const totalPages = pdfDoc.numPages;
+    if (totalPages <= 2) {
+      return; // no hay saltos que hacer
     }
-
-    // Si vamos hacia atrás (has rebobinado)
-    while (logicalPage < leftPage && leftPage > 1) {
-      rightPage = leftPage;
-      leftPage = Math.max(1, leftPage - 1);
-    }
-
-    renderDoublePage();
-  }
-
-  // ========= SINCRONIZACIÓN CON EL AUDIO =========
-  audio.addEventListener('timeupdate', () => {
-    if (!pdfLoaded) return;
 
     const t = audio.currentTime;
-    const newLogical = getLogicalPageForTime(t);
 
-    if (newLogical !== logicalPage) {
-      logicalPage = newLogical;
-      updateViewerToLogicalPage();
+    // Contamos cuántos saltos han ocurrido ya (t >= tiempo del salto)
+    let turnsDone = 0;
+    for (let i = 0; i < pageTurnTimes.length; i++) {
+      if (t >= pageTurnTimes[i]) {
+        turnsDone++;
+      } else {
+        break; // están en orden creciente
+      }
+    }
+
+    // leftPage = 1 + turnsDone, limitado a [1, totalPages-1]
+    let newLeft = 1 + turnsDone;
+    if (newLeft > totalPages - 1) {
+      newLeft = totalPages - 1;
+    }
+    if (newLeft < 1) newLeft = 1;
+
+    let newRight = (newLeft + 1 <= totalPages) ? newLeft + 1 : totalPages;
+
+    if (newLeft !== leftPage || newRight !== rightPage) {
+      leftPage = newLeft;
+      rightPage = newRight;
+      renderDoublePage();
     }
 
     statusEl.textContent =
-      `t=${t.toFixed(1)}s | Página lógica: ${logicalPage} | Viendo: ${leftPage}-${rightPage} | Modo: ${mode}`;
-  });
+      `t=${t.toFixed(1)}s | Saltos hechos: ${turnsDone} | Viendo páginas: ${leftPage}-${rightPage}`;
+  }
 
-  // ========= CAMBIO DE MODO AUTO / MANUAL =========
-  modeAutoRadio.addEventListener('change', () => {
-    if (modeAutoRadio.checked) {
-      mode = 'auto';
-      manualPanel.style.display = 'none';
+  // ========= EVENTOS DEL AUDIO =========
+  audio.addEventListener('loadedmetadata', () => {
+    audioMetaLoaded = true;
+    audioDuration = audio.duration || 0;
+
+    if (audioDuration <= 0) {
+      statusEl.textContent = 'El MP3 parece no tener duración válida.';
+    }
+
+    // Si el PDF ya está cargado, calculamos saltos
+    if (pdfDoc) {
+      initPageTurnTimes();
     }
   });
 
-  modeManualRadio.addEventListener('change', () => {
-    if (modeManualRadio.checked) {
-      mode = 'manual';
-      manualPanel.style.display = 'block';
-      // Por si has cambiado la estructura automática, re-asegura bases:
-      if (!manualChangePoints.length) {
-        initManualFromAuto();
+  audio.addEventListener('timeupdate', () => {
+    updatePagesForCurrentTime();
+  });
+
+  // ========= APLICAR CAMBIOS MANUALES =========
+  applyBtn.addEventListener('click', () => {
+    if (!pdfDoc || !pageTurnTimes || pageTurnTimes.length === 0) return;
+
+    const totalPages = pdfDoc.numPages;
+    if (totalPages <= 2) return;
+
+    const inputs = manualControls.querySelectorAll('input[type="number"]');
+    const newTimes = [];
+
+    inputs.forEach(input => {
+      const idx = parseInt(input.dataset.index, 10);
+      let val = parseFloat(String(input.value).replace(',', '.'));
+      if (!isNaN(idx) && !isNaN(val)) {
+        val = Math.max(0, val);
+        newTimes[idx] = val;
+      }
+    });
+
+    // Rellenar huecos que no hayan sido escritos correctamente con el valor anterior
+    for (let i = 0; i < pageTurnTimes.length; i++) {
+      if (typeof newTimes[i] !== 'number') {
+        newTimes[i] = pageTurnTimes[i];
       }
     }
+
+    // Ordenamos de menor a mayor para asegurar que los saltos son cronológicos
+    newTimes.sort((a, b) => a - b);
+    pageTurnTimes = newTimes;
+
+    statusEl.textContent =
+      'Cambios manuales aplicados. Cada vez que el MP3 pase por uno de esos segundos se avanzará un salto de páginas.';
   });
 
   // ========= BOTÓN CARGAR =========
@@ -423,17 +448,18 @@
 
     statusEl.textContent = 'Cargando archivos…';
 
+    // Cargamos PDF
     loadPDF(pdfFile);
 
+    // Cargamos audio
     const audioURL = URL.createObjectURL(audioFile);
     audio.src = audioURL;
     audio.load();
 
     statusEl.textContent =
-      'Archivos cargados. El modo automático ya calcula los cambios; puedes afinar en el modo manual.';
+      'Archivos cargados. Se calcularán saltos aproximados y podrás ajustarlos antes o durante la reproducción.';
   });
 </script>
 
 </body>
 </html>
-    
